@@ -1,0 +1,21 @@
+# Ignore Python virtual environment
+venv/
+
+# Ignore compiled files
+__pycache__/
+*.pyc
+*.pyo
+
+# Ignore temporary uploads or data
+uploads/
+*.mp4
+*.avi
+*.mov
+
+# Ignore YOLO models if too large
+*.pt
+*.weights
+
+# Ignore system files
+.DS_Store
+Thumbs.db
