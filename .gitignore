@@ -1,21 +1,43 @@
-# Ignore Python virtual environment
-venv/
-
-# Ignore compiled files
+# === Python ===
 __pycache__/
-*.pyc
+*.py[cod]
 *.pyo
+*.pyd
+*.pdb
+*.egg-info/
+*.egg
+*.log
 
-# Ignore temporary uploads or data
-uploads/
+# === Environnements virtuels ===
+venv/
+.env/
+.env.bak/
+ENV/
+env/
+.venv/
+
+# === Fichiers VSCode ===
+.vscode/
+.settings/
+
+# === Fichiers système ===
+.DS_Store
+Thumbs.db
+
+# === Fichiers temporaires ===
+*.tmp
+*.bak
+*.swp
+*.cache/
+.cache/
+__MACOSX/
 *.mp4
 *.avi
 *.mov
+*.mkv
 
-# Ignore YOLO models if too large
-*.pt
-*.weights
-
-# Ignore system files
-.DS_Store
-Thumbs.db
+# === Dossiers de sortie ===
+outputs/
+runs/
+checkpoints/
+results/
