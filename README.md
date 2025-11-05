@@ -1,5 +1,14 @@
 # SR04 Groupe 9 - Système de détection de trafic intelligent
 
+## Équipe du projet
+**SR04 - Groupe 9**  
+- **Maxime Gautrot**  
+- **Jingjing Dai**  
+- **Hassan Sahnoun**  
+
+---
+
+
 ## Description du projet
 Ce projet a été développé dans le cadre du module **SR04 - Réseaux et Applications** à l’**Université de Technologie de Compiègne (UTC)**.  
 L’objectif est de concevoir un **système intelligent de gestion du trafic** basé sur l’intelligence artificielle (**YOLOv8**) et trois protocoles de communication différents :
@@ -32,6 +41,35 @@ SR04_Group9Project/
 ```
 
 ---
+
+## Description des modules
+
+### 1. Détection YOLO (module commun `detector.py`)
+- Contient la classe `VehicleDetector` utilisée par tous les clients (HTTP / WS / MQTT)
+- Fonctionnalités :
+  - Chargement du modèle **YOLOv8**
+  - Détection des véhicules sur chaque image
+  - Dessin des boîtes et du feu tricolore virtuel
+  - Mesure et enregistrement des **latences** (CSV)
+
+### 2. Clients
+- `client_http.py` : envoie les détections via **requêtes HTTP** au serveur Flask  
+- `client_ws.py` : communique avec le serveur via **WebSocket** (temps réel)  
+- `client_mqtt.py` : publie les données sur un **broker MQTT** (Mosquitto)
+
+### 3. Serveurs
+- `server_http.py` : reçoit les requêtes POST, applique la logique du feu et renvoie la couleur  
+- `server_ws.py` : maintient une connexion WebSocket bidirectionnelle  
+- `server_mqtt.py` : écoute les messages du topic `traffic/vehicle_count` et publie `traffic/led`
+
+### 4. Interface centrale `run_all.py`
+- Interface Tkinter unifiée pour :
+  - Lancer et arrêter les différents modes
+  - Surveiller l’état des processus client/serveur
+  - Visualiser les latences enregistrées (graphique)
+
+---
+
 
 ## Installation et configuration
 
@@ -80,6 +118,27 @@ Chaque mode lance automatiquement le **serveur** et le **client** correspondants
 
 ---
 
+## Résultats expérimentaux
+
+Les tests ont été réalisés sur un ordinateur portable sous **Windows 11** avec :
+- CPU : Intel Core i7  
+- GPU : NVIDIA RTX 3050  
+- Réseau local : Wi-Fi 5 GHz  
+
+### Moyenne des latences mesurées :
+| Protocole | Moyenne (ms) | Observation |
+|------------|---------------|-------------|
+| HTTP | ~120 ms | Stable mais moins réactif |
+| WebSocket | ~70 ms | Très fluide et bidirectionnel |
+| MQTT | ~60 ms | Le plus léger, idéal pour l’IoT |
+
+### Interprétation :
+- **HTTP** : simple mais légèrement plus lent car connexion recréée à chaque requête  
+- **WebSocket** : très bon compromis entre performance et fiabilité  
+- **MQTT** : optimal pour les environnements embarqués (ex. capteurs, Raspberry Pi)
+
+
+
 ## Technologies utilisées
 | Composant | Technologie |
 |------------|-------------|
@@ -90,18 +149,6 @@ Chaque mode lance automatiquement le **serveur** et le **client** correspondants
 | Interface graphique | Tkinter |
 | Langage principal | Python 3.11 |
 | OS testé | Windows 10 / 11 |
-
----
-
-## Équipe du projet
-**SR04 - Groupe 9**  
-- **Maxime Gautrot**  
-- **Jingjing Dai**  
-- **Hassan Sahnoun**  
-
-Encadré par :  
-**Université de Technologie de Compiègne (UTC)**  
-Module SR04 – Réseaux et Applications
 
 ---
 

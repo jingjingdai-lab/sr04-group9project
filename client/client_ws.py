@@ -3,9 +3,10 @@
 # Fichier : client/client_ws.py
 # Description :
 #   Client graphique de détection YOLO (version WebSocket)
+#   - Utilise le module VehicleDetector (YOLOv8)
 #   - Permet de choisir entre caméra ou fichier vidéo
-#   - Détection YOLOv8 avec cadres et étiquettes
 #   - Envoie le nombre de véhicules au serveur WebSocket
+#   - Mesure la latence et la sauvegarde dans un fichier CSV
 #   - Affiche en temps réel l’état du feu (rouge/jaune/vert)
 #   - Redémarre automatiquement la vidéo et se reconnecte en cas de déconnexion
 # =========================================================
@@ -15,20 +16,28 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from ultralytics import YOLO
-from websocket import create_connection, WebSocketConnectionClosedException
 import json
+import csv
 import os
+from websocket import create_connection, WebSocketConnectionClosedException
+from detector import VehicleDetector  # 🔹 Module commun pour la détection YOLO
 
 # ---------- Configuration ----------
 SERVER_URL = "ws://127.0.0.1:5001"
 MODEL_NAME = "yolov8n.pt"
-VEHICLE_CLASSES = {"car", "truck", "bus", "motorbike"}
+LAT_FILE = "latency_ws.csv"
 WINDOW_TITLE = "SR04 - Détection de trafic (WebSocket)"
+RESET_LATENCY_FILE = True  # 🧹 True = recrée le fichier CSV à chaque exécution
 # -----------------------------------
 
-print("Chargement du modèle YOLO...")
-model = YOLO(MODEL_NAME)
+# --- Initialisation du détecteur YOLO ---
+detector = VehicleDetector(model_name=MODEL_NAME, latency_file=LAT_FILE)
+
+# --- Préparation du fichier CSV ---
+if RESET_LATENCY_FILE or not os.path.exists(LAT_FILE):
+    with open(LAT_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "latency_ms"])
 
 # --- Variables globales ---
 ws = None
@@ -40,46 +49,43 @@ running = True
 
 # --- Connexion WebSocket ---
 def ws_connect():
-    """Établit une connexion WebSocket avec le serveur"""
+    """Établit une connexion WebSocket avec le serveur (avec tentatives automatiques)."""
     global ws
     while True:
         try:
             ws = create_connection(SERVER_URL)
-            print("Connecté au serveur WebSocket.")
+            print(f"✅ Connecté au serveur WebSocket ({SERVER_URL})")
             return
         except Exception as e:
-            print(f"Échec de la connexion WebSocket : {e}")
-            print("Nouvelle tentative dans 3 secondes...")
+            print(f"⚠️ Échec de la connexion WebSocket : {e}")
+            print("⏳ Nouvelle tentative dans 3 secondes...")
             time.sleep(3)
 
 
-# --- Thread de détection ---
+# --- Thread principal de détection ---
 def run_detection(source_type="camera", path=None):
-    """Exécute la détection en temps réel sur la caméra ou une vidéo"""
+    """Exécute la détection en temps réel (caméra ou vidéo) et communique via WebSocket."""
     global led_color, running
-    root.withdraw()  # Masquer la fenêtre principale Tkinter
+    root.withdraw()  # Masquer la fenêtre principale
     ws_connect()
 
-    if source_type == "camera":
-        cap = cv2.VideoCapture(0)
-    else:
-        cap = cv2.VideoCapture(path)
-
+    cap = cv2.VideoCapture(0 if source_type == "camera" else path)
     if not cap.isOpened():
         messagebox.showerror("Erreur", "Impossible d’ouvrir la source vidéo.")
         root.deiconify()
         return
 
+    last_latency = 0  # Pour affichage à l’écran
+
     while running:
         ret, frame = cap.read()
         if not ret:
-            # Redémarrage automatique de la vidéo
+            # 🔁 Redémarre la vidéo automatiquement
             if source_type == "video":
                 try:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     continue
                 except Exception:
-                    print("Vidéo terminée, redémarrage du flux.")
                     cap.release()
                     cap = cv2.VideoCapture(path)
                     continue
@@ -87,51 +93,48 @@ def run_detection(source_type="camera", path=None):
                 print("📷 Fin du flux caméra.")
                 break
 
-        # Détection avec YOLO
-        results = model(frame, verbose=False)
-        count = 0
-        if results:
-            r = results[0]
-            for box in r.boxes:
-                label = model.names[int(box.cls[0])]
-                if label in VEHICLE_CLASSES:
-                    count += 1
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (x1, y1 - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # --- Détection YOLO via le module ---
+        count, frame = detector.detect(frame)
 
-        # Envoi du nombre de véhicules au serveur
+        # --- Envoi des données + mesure de latence ---
         try:
             if ws:
                 message = json.dumps({"vehicle_count": count})
+                t_start = time.time()
                 ws.send(message)
-                # Réception de la réponse du serveur (état du feu)
-                try:
-                    response = ws.recv()
-                    data = json.loads(response)
-                    led_color = data.get("led", "red")
-                except Exception:
-                    pass
+                response = ws.recv()
+                t_end = time.time()
+                latency = (t_end - t_start) * 1000  # en millisecondes
+                last_latency = latency
+
+                # Enregistre la latence dans le fichier CSV
+                with open(LAT_FILE, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([time.time(), latency])
+
+                # Mise à jour de l’état du feu
+                data = json.loads(response)
+                led_color = data.get("led", "red")
+
         except WebSocketConnectionClosedException:
-            print("Connexion WebSocket perdue, reconnexion en cours...")
+            print("⚠️ Connexion WebSocket perdue, reconnexion...")
             ws_connect()
+        except Exception as e:
+            print(f"❌ Erreur de communication WebSocket : {e}")
 
-        # Dessin du feu tricolore à l’écran
-        if led_color == "green":
-            color = (0, 255, 0)
-        elif led_color == "yellow":
-            color = (0, 255, 255)
-        else:
-            color = (0, 0, 255)
+        # --- Affichage du feu tricolore ---
+        detector.draw_traffic_light(frame, led_color)
 
-        cv2.circle(frame, (50, 50), 20, color, -1)
-        cv2.putText(frame, f"Vehicles: {count}", (10, 95),
+        # --- Informations à l’écran ---
+        cv2.putText(frame, f"Vehicules : {count}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Latence : {last_latency:.1f} ms", (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
+        # --- Fenêtre OpenCV ---
         cv2.imshow(WINDOW_TITLE, frame)
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # Touche Échap → quitter
+        if key == 27:  # ESC
             running = False
             break
 
@@ -140,12 +143,12 @@ def run_detection(source_type="camera", path=None):
     root.deiconify()
     if ws:
         ws.close()
-    print("Détection terminée.")
+    print("🛑 Détection terminée.")
 
 
-# --- Fonctions GUI ---
+# --- Interface graphique ---
 def start_camera():
-    """Lance la détection à partir de la caméra"""
+    """Lance la détection depuis la caméra."""
     global detector_thread, running
     running = True
     if detector_thread and detector_thread.is_alive():
@@ -154,8 +157,9 @@ def start_camera():
     detector_thread = threading.Thread(target=run_detection, args=("camera",), daemon=True)
     detector_thread.start()
 
+
 def upload_video():
-    """Lance la détection à partir d’un fichier vidéo choisi"""
+    """Lance la détection depuis un fichier vidéo."""
     global detector_thread, running, video_path
     running = True
     if detector_thread and detector_thread.is_alive():
@@ -171,8 +175,9 @@ def upload_video():
     detector_thread = threading.Thread(target=run_detection, args=("video", path), daemon=True)
     detector_thread.start()
 
+
 def exit_app():
-    """Ferme proprement l’application"""
+    """Ferme proprement l’application."""
     global running
     running = False
     try:
@@ -184,13 +189,13 @@ def exit_app():
     root.destroy()
 
 
-# --- Interface graphique ---
+# --- Fenêtre principale Tkinter ---
 root = tk.Tk()
-root.title("SR04 Client de trafic intelligent (WebSocket)")
+root.title("SR04 - Client de trafic intelligent (WebSocket)")
 root.geometry("420x280")
 root.resizable(False, False)
 
-tk.Label(root, text="SR04 - Détection intelligente (WebSocket)",
+tk.Label(root, text="SR04 Groupe 9 - Détection intelligente (WebSocket)",
          font=("Segoe UI", 14, "bold")).pack(pady=15)
 
 tk.Button(root, text="Ouvrir la caméra",

@@ -2,9 +2,11 @@
 # SR04 Groupe 9 - Projet
 # Fichier : client/client_mqtt.py
 # Description :
-#   Client de détection YOLO utilisant le protocole MQTT
+#   Client graphique de détection YOLO utilisant le protocole MQTT
+#   - Utilise le module VehicleDetector (YOLOv8)
 #   - Publie le nombre de véhicules sur "traffic/vehicle_count"
 #   - S’abonne au topic "traffic/led" pour recevoir la couleur du feu
+#   - Mesure la latence de communication et l’enregistre dans un fichier CSV
 # =========================================================
 
 import cv2
@@ -12,22 +14,31 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from ultralytics import YOLO
-import paho.mqtt.client as mqtt
 import json
+import csv
 import os
+import paho.mqtt.client as mqtt
+from detector import VehicleDetector  # 🔹 Import du module YOLO commun
 
-# --- Paramètres MQTT et modèle YOLO ---
+# --- Paramètres MQTT et configuration YOLO ---
 BROKER = "localhost"
 PORT = 1883
 TOPIC_COUNT = "traffic/vehicle_count"
 TOPIC_LED = "traffic/led"
 MODEL_NAME = "yolov8n.pt"
-VEHICLE_CLASSES = {"car", "truck", "bus", "motorbike"}
+LAT_FILE = "latency_mqtt.csv"
 WINDOW_TITLE = "SR04 - Détection de trafic (MQTT)"
+RESET_LATENCY_FILE = True  # 🧹 True = recrée le CSV à chaque exécution
+# ---------------------------------------------
 
-print("Chargement du modèle YOLO...")
-model = YOLO(MODEL_NAME)
+# --- Initialisation du détecteur ---
+detector = VehicleDetector(model_name=MODEL_NAME, latency_file=LAT_FILE)
+
+# --- Initialisation du fichier CSV ---
+if RESET_LATENCY_FILE or not os.path.exists(LAT_FILE):
+    with open(LAT_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "latency_ms"])
 
 # --- Variables globales ---
 client = None
@@ -36,14 +47,16 @@ detector_thread = None
 video_path = None
 running = True
 
+
 # --- Fonctions de rappel MQTT ---
 def on_connect(client, userdata, flags, rc):
-    """Appelée lors de la connexion au broker MQTT"""
+    """Appelée lors de la connexion au broker MQTT."""
     print(f"✅ Connecté au broker MQTT ({BROKER}:{PORT})")
     client.subscribe(TOPIC_LED)
 
+
 def on_message(client, userdata, msg):
-    """Appelée lorsqu’un message est reçu sur le topic 'traffic/led'"""
+    """Appelée lorsqu’un message est reçu sur le topic 'traffic/led'."""
     global led_color
     try:
         data = json.loads(msg.payload.decode())
@@ -51,9 +64,10 @@ def on_message(client, userdata, msg):
     except Exception:
         pass
 
+
 # --- Connexion au broker MQTT ---
 def mqtt_connect():
-    """Établit la connexion avec le broker MQTT et démarre l’écoute en arrière-plan"""
+    """Établit la connexion avec le broker MQTT et démarre l’écoute en arrière-plan."""
     global client
     client = mqtt.Client()
     client.on_connect = on_connect
@@ -61,9 +75,10 @@ def mqtt_connect():
     client.connect(BROKER, PORT, 60)
     threading.Thread(target=client.loop_forever, daemon=True).start()
 
+
 # --- Détection principale ---
 def run_detection(source_type="camera", path=None):
-    """Effectue la détection en temps réel et communique via MQTT"""
+    """Effectue la détection en temps réel et communique via MQTT."""
     global running
     root.withdraw()
     mqtt_connect()
@@ -73,6 +88,8 @@ def run_detection(source_type="camera", path=None):
         messagebox.showerror("Erreur", "Impossible d’ouvrir la source vidéo.")
         root.deiconify()
         return
+
+    last_latency = 0  # pour affichage
 
     while running:
         ret, frame = cap.read()
@@ -84,27 +101,34 @@ def run_detection(source_type="camera", path=None):
             else:
                 break
 
-        # Détection avec YOLO
-        results = model(frame, verbose=False)
-        count = 0
-        if results:
-            for box in results[0].boxes:
-                label = model.names[int(box.cls[0])]
-                if label in VEHICLE_CLASSES:
-                    count += 1
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (x1, y1 - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+        # --- Détection via le module YOLO ---
+        count, frame = detector.detect(frame)
 
-        # Publication du nombre de véhicules détectés
-        client.publish(TOPIC_COUNT, json.dumps({"vehicle_count": count}))
+        # --- Publication MQTT + mesure latence ---
+        try:
+            t_start = time.time()
+            client.publish(TOPIC_COUNT, json.dumps({"vehicle_count": count}))
+            t_end = time.time()
+            latency = (t_end - t_start) * 1000
+            last_latency = latency
 
-        # Dessin du feu tricolore selon la couleur reçue
-        color = (0, 0, 255) if led_color == "red" else (0, 255, 255) if led_color == "yellow" else (0, 255, 0)
-        cv2.circle(frame, (50, 50), 20, color, -1)
-        cv2.putText(frame, f"Vehicles: {count}", (10, 95),
+            # Enregistre la latence dans le CSV
+            with open(LAT_FILE, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([time.time(), latency])
+
+        except Exception as e:
+            print(f"⚠️ Erreur de publication MQTT : {e}")
+
+        # --- Dessin du feu tricolore ---
+        detector.draw_traffic_light(frame, led_color)
+
+        # --- Affichage du nombre de véhicules + latence ---
+        cv2.putText(frame, f"Vehicules : {count}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Latence : {last_latency:.1f} ms", (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+
         cv2.imshow(WINDOW_TITLE, frame)
 
         # Quitter avec la touche Échap
@@ -116,21 +140,25 @@ def run_detection(source_type="camera", path=None):
     cv2.destroyAllWindows()
     root.deiconify()
 
+
 # --- Interface graphique (GUI) ---
 def start_camera():
-    """Lance la détection depuis la caméra"""
+    """Lance la détection depuis la caméra."""
     global detector_thread, running
     running = True
     if detector_thread and detector_thread.is_alive():
+        messagebox.showinfo("Info", "La détection est déjà en cours.")
         return
     detector_thread = threading.Thread(target=run_detection, args=("camera",), daemon=True)
     detector_thread.start()
 
+
 def upload_video():
-    """Lance la détection depuis un fichier vidéo"""
+    """Lance la détection depuis un fichier vidéo."""
     global detector_thread, running, video_path
     running = True
     if detector_thread and detector_thread.is_alive():
+        messagebox.showinfo("Info", "La détection est déjà en cours.")
         return
     path = filedialog.askopenfilename(
         title="Choisir une vidéo",
@@ -142,8 +170,9 @@ def upload_video():
     detector_thread = threading.Thread(target=run_detection, args=("video", path), daemon=True)
     detector_thread.start()
 
+
 def exit_app():
-    """Ferme proprement l’application"""
+    """Ferme proprement l’application."""
     global running
     running = False
     try:
@@ -154,13 +183,14 @@ def exit_app():
         pass
     root.destroy()
 
+
 # --- Fenêtre principale ---
 root = tk.Tk()
 root.title("SR04 - Client de trafic intelligent (MQTT)")
 root.geometry("420x280")
 root.resizable(False, False)
 
-tk.Label(root, text="SR04 - Détection intelligente (MQTT)",
+tk.Label(root, text="SR04 Groupe 9 - Détection intelligente (MQTT)",
          font=("Segoe UI", 14, "bold")).pack(pady=15)
 
 tk.Button(root, text="Ouvrir la caméra",
@@ -176,4 +206,3 @@ tk.Button(root, text="Quitter",
           bg="#f44336", fg="white").pack(pady=12)
 
 root.mainloop()
-

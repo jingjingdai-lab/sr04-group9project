@@ -1,12 +1,13 @@
 # =========================================================
 # SR04 Groupe 9 - Projet
-# Fichier : client/client.py
+# Fichier : client/client_http.py
 # Description :
 #   Client graphique de détection YOLO (version HTTP)
 #   - Interface Tkinter : Ouvrir la caméra / Charger une vidéo
-#   - Détection YOLOv8 avec cadres et étiquettes
+#   - Utilise le module VehicleDetector (YOLOv8)
 #   - Envoie le nombre de véhicules au serveur Flask
-#   - Affiche un feu tricolore virtuel (rouge/jaune/vert)
+#   - Mesure la latence et l’enregistre dans un fichier CSV
+#   - Affiche un feu tricolore virtuel (rouge / jaune / vert)
 # =========================================================
 
 import cv2
@@ -14,38 +15,46 @@ import requests
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox
-from ultralytics import YOLO
+import time
+import csv
+import os
+from detector import VehicleDetector  # 🔹 module externe pour la détection YOLO
 
 # ---------- Configuration ----------
 SERVER_URL = "http://127.0.0.1:5000/traffic"
-MODEL_NAME = "yolov8n.pt"  # modèle léger et rapide ; remplacer par 'yolov8s.pt' pour plus de précision
-VEHICLE_CLASSES = {"car", "truck", "bus", "motorbike"}  # peut être étendu : "bicycle"
+MODEL_NAME = "yolov8n.pt"
+LAT_FILE = "latency_http.csv"
 WINDOW_TITLE = "SR04 - Détection de trafic (HTTP)"
 # -----------------------------------
 
-# Chargement du modèle YOLO
-print("Chargement du modèle YOLO... (le premier lancement peut prendre quelques secondes)")
-model = YOLO(MODEL_NAME)
+# --- Initialisation du détecteur YOLO ---
+detector = VehicleDetector(model_name=MODEL_NAME, latency_file=LAT_FILE)
+
+# --- Création du fichier CSV s’il n’existe pas ---
+if not os.path.exists(LAT_FILE):
+    with open(LAT_FILE, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(["timestamp", "latency_ms"])
 
 # --- Fenêtre principale Tkinter ---
 root = tk.Tk()
 root.title("SR04 - Client de trafic intelligent (HTTP)")
-root.geometry("420x260")
+root.geometry("420x280")
 root.resizable(False, False)
 
 # --- Gestion du thread de détection ---
 detector_thread = None
 
+
 def run_detection(source_type: str, path: str | None = None):
     """
-    Exécute la boucle de détection dans un thread séparé.
-    source_type : "camera" ou "video"
-    path : chemin du fichier vidéo si source_type == "video"
+    Exécute la boucle principale de détection dans un thread séparé.
+    :param source_type: "camera" ou "video"
+    :param path: chemin du fichier vidéo si source_type == "video"
     """
-    # Masquer la fenêtre principale pendant la détection
-    root.withdraw()
+    root.withdraw()  # Masquer la fenêtre principale pendant la détection
 
-    # Ouvrir la source vidéo
+    # --- Ouverture de la source vidéo ---
     if source_type == "camera":
         cap = cv2.VideoCapture(0)
         if not cap.isOpened():
@@ -69,58 +78,49 @@ def run_detection(source_type: str, path: str | None = None):
             else:
                 break
 
-        # Détection YOLO
-        results = model(frame, verbose=False)
+        # --- Détection via le module VehicleDetector ---
+        count, frame = detector.detect(frame)
 
-        # Comptage et dessin des boîtes
-        count = 0
-        if results and len(results) > 0:
-            r = results[0]
-            for box in r.boxes:
-                cls_id = int(box.cls[0])
-                label = model.names[cls_id]
-                if label in VEHICLE_CLASSES:
-                    count += 1
-                    x1, y1, x2, y2 = map(int, box.xyxy[0])
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                    cv2.putText(frame, label, (x1, y1 - 6),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-
-        # Envoi du résultat au serveur Flask
+        # --- Mesure et enregistrement de la latence HTTP ---
         try:
+            t_start = time.time()
             res = requests.post(SERVER_URL, json={"vehicle_count": count}, timeout=1.0)
+            t_end = time.time()
+            latency = (t_end - t_start) * 1000  # millisecondes
+
+            # Enregistre la latence dans le fichier CSV
+            with open(LAT_FILE, "a", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([time.time(), latency])
+
             led = res.json().get("led", "red")
         except Exception:
             led = "red"
 
-        # Dessin du feu tricolore à l’écran
-        if led == "green":
-            color = (0, 255, 0)
-        elif led == "yellow":
-            color = (0, 255, 255)
-        else:
-            color = (0, 0, 255)
-        cv2.circle(frame, (50, 50), 20, color, -1)
+        # --- Dessin du feu tricolore ---
+        detector.draw_traffic_light(frame, led)
 
-        # Affichage du nombre de véhicules
-        cv2.putText(frame, f"Vehicles: {count}", (10, 95),
+        # --- Affichage du nombre de véhicules + latence ---
+        cv2.putText(frame, f"Vehicules : {count}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
+        cv2.putText(frame, f"Latence : {latency:.1f} ms", (10, 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
 
-        # Affiche la fenêtre OpenCV
+        # --- Affiche la fenêtre OpenCV ---
         cv2.imshow(WINDOW_TITLE, frame)
 
         # Quitter avec la touche Échap
         key = cv2.waitKey(1) & 0xFF
-        if key == 27:  # ESC
+        if key == 27:
             break
 
     cap.release()
     cv2.destroyAllWindows()
-    # Réafficher la fenêtre Tkinter après la détection
-    root.deiconify()
+    root.deiconify()  # Réaffiche la fenêtre principale
+
 
 def start_camera():
-    """Lance la détection à partir de la caméra"""
+    """Lance la détection à partir de la caméra."""
     global detector_thread
     if detector_thread and detector_thread.is_alive():
         messagebox.showinfo("Info", "La détection est déjà en cours.")
@@ -128,8 +128,9 @@ def start_camera():
     detector_thread = threading.Thread(target=run_detection, args=("camera",), daemon=True)
     detector_thread.start()
 
+
 def upload_video():
-    """Lance la détection à partir d’un fichier vidéo"""
+    """Lance la détection à partir d’un fichier vidéo."""
     global detector_thread
     if detector_thread and detector_thread.is_alive():
         messagebox.showinfo("Info", "La détection est déjà en cours.")
@@ -143,25 +144,30 @@ def upload_video():
     detector_thread = threading.Thread(target=run_detection, args=("video", path), daemon=True)
     detector_thread.start()
 
+
 def exit_app():
-    """Ferme proprement l’application"""
+    """Ferme proprement l’application."""
     try:
         cv2.destroyAllWindows()
     except Exception:
         pass
     root.destroy()
 
+
 # --- Interface graphique ---
 tk.Label(root, text="SR04 Groupe 9 - Détection intelligente (HTTP)",
          font=("Segoe UI", 14, "bold")).pack(pady=18)
 
 tk.Button(root, text="Ouvrir la caméra",
-          command=start_camera, width=22, height=2, bg="#4CAF50", fg="white").pack(pady=6)
+          command=start_camera, width=22, height=2,
+          bg="#4CAF50", fg="white").pack(pady=6)
 
 tk.Button(root, text="Choisir une vidéo",
-          command=upload_video, width=22, height=2, bg="#2196F3", fg="white").pack(pady=6)
+          command=upload_video, width=22, height=2,
+          bg="#2196F3", fg="white").pack(pady=6)
 
 tk.Button(root, text="Quitter",
-          command=exit_app, width=22, height=2, bg="#f44336", fg="white").pack(pady=12)
+          command=exit_app, width=22, height=2,
+          bg="#f44336", fg="white").pack(pady=12)
 
 root.mainloop()
