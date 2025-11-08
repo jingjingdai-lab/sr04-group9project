@@ -6,7 +6,7 @@
 #   - Utilise le module VehicleDetector (YOLOv8)
 #   - Publie le nombre de véhicules sur "traffic/vehicle_count"
 #   - S’abonne au topic "traffic/led" pour recevoir la couleur du feu
-#   - Mesure la latence de communication et l’enregistre dans un fichier CSV
+#   - Mesure la latence + taille du message, et les enregistre dans un fichier CSV
 # =========================================================
 
 import cv2
@@ -17,6 +17,7 @@ from tkinter import filedialog, messagebox
 import json
 import csv
 import os
+import sys
 import paho.mqtt.client as mqtt
 from detector import VehicleDetector  # 🔹 Import du module YOLO commun
 
@@ -38,7 +39,7 @@ detector = VehicleDetector(model_name=MODEL_NAME, latency_file=LAT_FILE)
 if RESET_LATENCY_FILE or not os.path.exists(LAT_FILE):
     with open(LAT_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "latency_ms"])
+        writer.writerow(["timestamp", "latency_ms", "msg_size_bytes"])
 
 # --- Variables globales ---
 client = None
@@ -51,7 +52,7 @@ running = True
 # --- Fonctions de rappel MQTT ---
 def on_connect(client, userdata, flags, rc):
     """Appelée lors de la connexion au broker MQTT."""
-    print(f"✅ Connecté au broker MQTT ({BROKER}:{PORT})")
+    print(f"Connecté au broker MQTT ({BROKER}:{PORT})")
     client.subscribe(TOPIC_LED)
 
 
@@ -89,12 +90,12 @@ def run_detection(source_type="camera", path=None):
         root.deiconify()
         return
 
-    last_latency = 0  # pour affichage
+    last_latency = 0
+    last_msg_size = 0
 
     while running:
         ret, frame = cap.read()
         if not ret:
-            # Redémarre automatiquement la vidéo si nécessaire
             if source_type == "video":
                 cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                 continue
@@ -104,34 +105,39 @@ def run_detection(source_type="camera", path=None):
         # --- Détection via le module YOLO ---
         count, frame = detector.detect(frame)
 
-        # --- Publication MQTT + mesure latence ---
+        # --- Publication MQTT + mesure latence + taille message ---
         try:
-            t_start = time.time()
-            client.publish(TOPIC_COUNT, json.dumps({"vehicle_count": count}))
-            t_end = time.time()
-            latency = (t_end - t_start) * 1000
-            last_latency = latency
+            payload = json.dumps({"vehicle_count": count})
+            msg_size = sys.getsizeof(payload)
 
-            # Enregistre la latence dans le CSV
+            t_start = time.time()
+            client.publish(TOPIC_COUNT, payload)
+            t_end = time.time()
+            latency = (t_end - t_start) * 1000  # en ms
+            last_latency = latency
+            last_msg_size = msg_size
+
+            # Enregistre dans le CSV
             with open(LAT_FILE, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([time.time(), latency])
+                writer.writerow([time.time(), round(latency, 2), msg_size])
 
         except Exception as e:
-            print(f"⚠️ Erreur de publication MQTT : {e}")
+            print(f"Erreur de publication MQTT : {e}")
 
         # --- Dessin du feu tricolore ---
         detector.draw_traffic_light(frame, led_color)
 
-        # --- Affichage du nombre de véhicules + latence ---
+        # --- Affichage des informations ---
         cv2.putText(frame, f"Vehicules : {count}", (10, 95),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"Latence : {last_latency:.1f} ms", (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"Taille msg : {last_msg_size} o", (10, 155),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
 
         cv2.imshow(WINDOW_TITLE, frame)
 
-        # Quitter avec la touche Échap
         if cv2.waitKey(1) & 0xFF == 27:
             running = False
             break

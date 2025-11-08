@@ -14,8 +14,11 @@ import signal
 import threading
 import time
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
 from tkinter import messagebox, Toplevel, Label, Button
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
 
 # --- Chemins des fichiers ---
 SERVER_HTTP = os.path.join("server", "server_http.py")
@@ -117,58 +120,156 @@ def stop_project():
 # =========================================================
 # 🔹 Visualisation des latences
 # =========================================================
+# =========================================================
+# 🔹 Visualisation des latences — version avec pertes réelles
+# =========================================================
 def show_latency_ui():
-    """Ouvre une fenêtre pour afficher les latences moyennes mesurées."""
+    """Affiche un tableau + graphiques combinés (avec pertes réelles)."""
+    import numpy as np
     FILES = {
         "HTTP": "latency_http.csv",
         "WebSocket": "latency_ws.csv",
         "MQTT": "latency_mqtt.csv"
     }
 
-    data = {}
-    means = {}
-
-    for proto, path in FILES.items():
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path)
-                if "latency_ms" in df.columns:
-                    df = df[df["latency_ms"] < 2000]
-                    data[proto] = df["latency_ms"].reset_index(drop=True)
-                    means[proto] = round(df["latency_ms"].mean(), 2)
-            except Exception as e:
-                print(f"⚠️ Erreur lecture {proto}: {e}")
-
-    if not means:
-        messagebox.showwarning("Aucune donnée", "Aucun fichier de latence trouvé dans le dossier courant.")
+    available = {name: path for name, path in FILES.items() if os.path.exists(path)}
+    if not available:
+        messagebox.showwarning("Aucun fichier", "Aucun fichier de latence trouvé.")
         return
 
-    # --- Fenêtre Tkinter ---
+    stats = {}
+    for proto, file in available.items():
+        try:
+            df = pd.read_csv(file, on_bad_lines="skip", engine="python", dtype={"latency_ms": "float"})
+            if "latency_ms" not in df.columns:
+                continue
+
+            # --- Ajout d'une taille simulée si manquante ---
+            if "msg_size_bytes" not in df.columns:
+                df["msg_size_bytes"] = 512 if proto == "HTTP" else 70  # taille moyenne d’un message
+
+            # --- Nettoyage des données ---
+            df = df[(df["latency_ms"] > 0) & (df["latency_ms"] < 2000)]
+            if len(df) == 0:
+                continue
+
+            # --- Calculs principaux ---
+            latencies = df["latency_ms"].to_numpy()
+            timestamps = df["timestamp"].to_numpy()
+            msg_sizes = df["msg_size_bytes"].to_numpy()
+
+            mean_latency = np.mean(latencies)
+            jitter = np.std(latencies)
+            bandwidth = np.mean((msg_sizes / (latencies / 1000)) / 1024)
+            energy = np.mean(msg_sizes / 1024)
+
+            # --- Calcul du taux de perte réel ---
+            if len(timestamps) > 1:
+                diffs = np.diff(timestamps)
+                mean_interval = np.mean(diffs)
+                lost_count = np.sum(diffs > mean_interval * 3)
+                real_loss_rate = (lost_count / len(diffs)) * 100
+            else:
+                real_loss_rate = 0.0
+
+            stats[proto] = {
+                "samples": len(df),
+                "latency_ms": round(mean_latency, 2),
+                "jitter_ms": round(jitter, 2),
+                "real_loss_rate": round(real_loss_rate, 2),
+                "bandwidth_kBps": round(bandwidth, 2),
+                "energy_cost_kBmsg": round(energy, 4),
+            }
+
+        except Exception as e:
+            print(f"⚠️ Erreur lecture {proto}: {e}")
+
+    if not stats:
+        messagebox.showwarning("Aucune donnée", "Aucune donnée exploitable trouvée.")
+        return
+
+    # --- Fenêtre Tkinter principale ---
     win = Toplevel(root)
-    win.title("Comparaison des latences (ms)")
-    win.geometry("430x320")
+    win.title("Analyse des performances réseau")
+    win.geometry("1000x750")
     win.configure(bg="#F7F9FB")
 
-    Label(win, text="📊 Moyenne des latences mesurées",
-          font=("Segoe UI", 13, "bold"), bg="#F7F9FB").pack(pady=10)
+    tk.Label(win, text="📊 Comparaison des protocoles de communication",
+             font=("Segoe UI", 15, "bold"), bg="#F7F9FB").pack(pady=10)
 
-    for proto, val in means.items():
-        Label(win, text=f"{proto} : {val} ms",
-              font=("Segoe UI", 12), bg="#F7F9FB").pack()
+    tk.Label(win, text="Analyse comparative : Latence, Jitter, Pertes réelles et Efficacité énergétique",
+             font=("Segoe UI", 11, "italic"), bg="#F7F9FB").pack()
 
-    def plot_graph():
-        """Affiche un graphique avec matplotlib."""
-        plt.figure(figsize=(6, 4))
-        plt.bar(means.keys(), means.values(), color=["#4CAF50", "#2196F3", "#FFC107"])
-        plt.title("Latence moyenne par protocole", fontsize=13)
-        plt.ylabel("Latence moyenne (ms)")
-        plt.grid(axis="y", alpha=0.3)
-        plt.tight_layout()
-        plt.show()
+    # --- Tableau résumé ---
+    frame_table = tk.Frame(win, bg="#F7F9FB")
+    frame_table.pack(pady=5)
 
-    Button(win, text="Afficher le graphique", command=plot_graph,
-           bg="#2196F3", fg="white", font=("Segoe UI", 10, "bold"),
-           width=20, height=1).pack(pady=18)
+    headers = ["Protocole", "Échantillons", "Latence (ms)", "Jitter (ms)",
+               "Pertes réelles (%)", "Bande passante (kB/s)", "Énergie (kB/msg)"]
+
+    for c, h in enumerate(headers):
+        tk.Label(frame_table, text=h, font=("Segoe UI", 11, "bold"),
+                 width=18, bg="#F7F9FB").grid(row=0, column=c, padx=3, pady=2)
+
+    for i, (proto, s) in enumerate(stats.items(), start=1):
+        tk.Label(frame_table, text=proto, bg="#F7F9FB", font=("Segoe UI", 10)).grid(row=i, column=0)
+        tk.Label(frame_table, text=s["samples"], bg="#F7F9FB").grid(row=i, column=1)
+        tk.Label(frame_table, text=s["latency_ms"], bg="#F7F9FB").grid(row=i, column=2)
+        tk.Label(frame_table, text=s["jitter_ms"], bg="#F7F9FB").grid(row=i, column=3)
+        tk.Label(frame_table, text=s["real_loss_rate"], bg="#F7F9FB").grid(row=i, column=4)
+        tk.Label(frame_table, text=s["bandwidth_kBps"], bg="#F7F9FB").grid(row=i, column=5)
+        tk.Label(frame_table, text=s["energy_cost_kBmsg"], bg="#F7F9FB").grid(row=i, column=6)
+
+    # --- Création du graphique combiné ---
+    fig, axs = plt.subplots(2, 3, figsize=(14, 7))
+    protocols = list(stats.keys())
+
+    # Graphique 1 : Latence
+    axs[0, 0].bar(protocols, [s["latency_ms"] for s in stats.values()],
+                  color="#4CAF50", alpha=0.9)
+    axs[0, 0].set_title("Latence moyenne (ms)")
+    axs[0, 0].grid(alpha=0.3)
+
+    # Graphique 2 : Bande passante
+    axs[0, 1].bar(protocols, [s["bandwidth_kBps"] for s in stats.values()],
+                  color="#2196F3", alpha=0.9)
+    axs[0, 1].set_title("Bande passante (kB/s)")
+    axs[0, 1].grid(alpha=0.3)
+
+    # Graphique 3 : Énergie
+    axs[0, 2].bar(protocols, [s["energy_cost_kBmsg"] for s in stats.values()],
+                  color="#FFC107", alpha=0.9)
+    axs[0, 2].set_title("Coût énergétique (kB/msg)")
+    axs[0, 2].grid(alpha=0.3)
+
+    # Graphique 4 : Jitter
+    axs[1, 0].bar(protocols, [s["jitter_ms"] for s in stats.values()],
+                  color="#9C27B0", alpha=0.9)
+    axs[1, 0].set_title("Variabilité de latence (Jitter ms)")
+    axs[1, 0].grid(alpha=0.3)
+
+    # Graphique 5 : Pertes réelles
+    axs[1, 1].bar(protocols, [s["real_loss_rate"] for s in stats.values()],
+                  color="#E91E63", alpha=0.9)
+    axs[1, 1].set_title("Taux de perte réel (%)")
+    axs[1, 1].grid(alpha=0.3)
+
+    # Cacher le dernier sous-plot vide
+    axs[1, 2].axis("off")
+
+    fig.tight_layout()
+
+    # --- Intégration dans Tkinter ---
+    canvas = FigureCanvasTkAgg(fig, master=win)
+    canvas.draw()
+    canvas.get_tk_widget().pack(pady=15)
+
+    tk.Button(win, text="Fermer", command=win.destroy,
+              bg="#555", fg="white", font=("Segoe UI", 10, "bold"), width=12).pack(pady=10)
+
+
+
+
 
 
 # =========================================================

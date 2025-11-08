@@ -7,6 +7,7 @@
 #   - Utilise le module VehicleDetector (YOLOv8)
 #   - Envoie le nombre de véhicules au serveur Flask
 #   - Mesure la latence et l’enregistre dans un fichier CSV
+#   - Enregistre aussi la taille du message envoyé (pour bande passante)
 #   - Affiche un feu tricolore virtuel (rouge / jaune / vert)
 # =========================================================
 
@@ -18,6 +19,8 @@ from tkinter import filedialog, messagebox
 import time
 import csv
 import os
+import json
+import sys
 from detector import VehicleDetector  # 🔹 module externe pour la détection YOLO
 
 # ---------- Configuration ----------
@@ -34,7 +37,7 @@ detector = VehicleDetector(model_name=MODEL_NAME, latency_file=LAT_FILE)
 if not os.path.exists(LAT_FILE):
     with open(LAT_FILE, "w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["timestamp", "latency_ms"])
+        writer.writerow(["timestamp", "latency_ms", "msg_size_bytes"])
 
 # --- Fenêtre principale Tkinter ---
 root = tk.Tk()
@@ -47,11 +50,7 @@ detector_thread = None
 
 
 def run_detection(source_type: str, path: str | None = None):
-    """
-    Exécute la boucle principale de détection dans un thread séparé.
-    :param source_type: "camera" ou "video"
-    :param path: chemin du fichier vidéo si source_type == "video"
-    """
+    """Boucle principale de détection (thread séparé)."""
     root.withdraw()  # Masquer la fenêtre principale pendant la détection
 
     # --- Ouverture de la source vidéo ---
@@ -78,24 +77,30 @@ def run_detection(source_type: str, path: str | None = None):
             else:
                 break
 
-        # --- Détection via le module VehicleDetector ---
+        # --- Détection via YOLO ---
         count, frame = detector.detect(frame)
+
+        # --- Préparation du message JSON ---
+        payload = {"vehicle_count": count}
+        msg_str = json.dumps(payload)
+        msg_size = sys.getsizeof(msg_str)  # Taille en octets
 
         # --- Mesure et enregistrement de la latence HTTP ---
         try:
             t_start = time.time()
-            res = requests.post(SERVER_URL, json={"vehicle_count": count}, timeout=1.0)
+            res = requests.post(SERVER_URL, json=payload, timeout=1.0)
             t_end = time.time()
             latency = (t_end - t_start) * 1000  # millisecondes
 
-            # Enregistre la latence dans le fichier CSV
+            # Enregistre la latence et la taille du message
             with open(LAT_FILE, "a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-                writer.writerow([time.time(), latency])
+                writer.writerow([time.time(), round(latency, 2), msg_size])
 
             led = res.json().get("led", "red")
         except Exception:
             led = "red"
+            latency = 0
 
         # --- Dessin du feu tricolore ---
         detector.draw_traffic_light(frame, led)
@@ -105,6 +110,8 @@ def run_detection(source_type: str, path: str | None = None):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
         cv2.putText(frame, f"Latence : {latency:.1f} ms", (10, 125),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.6, (200, 200, 200), 2)
+        cv2.putText(frame, f"Taille msg : {msg_size} o", (10, 155),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (180, 180, 180), 2)
 
         # --- Affiche la fenêtre OpenCV ---
         cv2.imshow(WINDOW_TITLE, frame)
@@ -120,7 +127,7 @@ def run_detection(source_type: str, path: str | None = None):
 
 
 def start_camera():
-    """Lance la détection à partir de la caméra."""
+    """Lance la détection depuis la caméra."""
     global detector_thread
     if detector_thread and detector_thread.is_alive():
         messagebox.showinfo("Info", "La détection est déjà en cours.")
@@ -130,7 +137,7 @@ def start_camera():
 
 
 def upload_video():
-    """Lance la détection à partir d’un fichier vidéo."""
+    """Lance la détection depuis un fichier vidéo."""
     global detector_thread
     if detector_thread and detector_thread.is_alive():
         messagebox.showinfo("Info", "La détection est déjà en cours.")
